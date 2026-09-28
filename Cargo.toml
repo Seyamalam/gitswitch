@@ -1,0 +1,19 @@
+[package]
+name = "gitswitch"
+version = "0.1.0"
+edition = "2021"
+description = "Use multiple GitHub accounts at the same time: main account via gh/HTTPS, extra accounts via SSH"
+license = "MIT"
+
+[[bin]]
+name = "gitswitch"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+clap_complete = "4"
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+dirs = "5"
