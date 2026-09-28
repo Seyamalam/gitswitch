@@ -35,11 +35,23 @@ gitswitch use <alias>      # sets local user.name/email, rewrites origin URL
 
 Never use `use --global`. Never rewrite remotes to "fix" auth — use `exec`.
 
-## Diagnose
+## Diagnose and repair
 
 ```bash
 gitswitch doctor            # gh login, keys, ~/.ssh/config entries, current repo
+gitswitch doctor --json     # same, machine-readable
+gitswitch doctor --fix      # recreate missing SSH blocks, repair repo remote URL
 ```
 
 If auth fails, surface `doctor` output to the user instead of retrying.
+
+## First-time setup (only when the user asks for it)
+
+```bash
+gitswitch setup --auto      # register main from gh login + global git config
+```
+
+Extra accounts need a username + email from the user — ask, don't invent.
+After `gitswitch gen-key <alias>`, STOP: the user must upload the `.pub`
+key to that GitHub account themselves. Never upload keys or run `gh auth login`.
 See `AGENTS.md` for the full agent contract.

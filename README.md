@@ -75,10 +75,11 @@ This is the account you're already logged into with `gh`. Nothing about your
 current workflow changes.
 
 ```bash
-gitswitch add --alias main --main
+gitswitch setup --auto
 ```
 
-No flags needed — it reads your name/email from your global git config.
+(`setup` detects your `gh` user and global git identity. Prefer the manual
+route? `gitswitch add --alias main --main` does the same thing.)
 Verify with `gitswitch list`.
 
 ### 2. Add a second account (5 min)
@@ -157,7 +158,8 @@ format). The short version:
 | `gitswitch exec <alias> -- <git args…>` | run one git command as that account |
 | `gitswitch clone <alias> <owner/repo\|url> [dest]` | clone with the right URL + identity |
 | `gitswitch remove <alias> [--drop-ssh]` | delete account (optionally its SSH block) |
-| `gitswitch doctor` | check gh auth, keys, SSH config, current repo |
+| `gitswitch setup [--auto]` | first-time setup: register main from `gh` + global git config (`--auto` = non-interactive, for agents) |
+| `gitswitch doctor [--json] [--fix]` | check everything (`--json` for agents; `--fix` recreates SSH blocks + repairs repo URL) |
 | `gitswitch completions <shell>` | print shell completions |
 | `gitswitch --help` / `gitswitch <cmd> --help` | full help for everything |
 

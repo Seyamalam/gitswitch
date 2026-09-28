@@ -101,8 +101,26 @@ enum Cmd {
         #[arg(long)]
         force: bool,
     },
+    /// Guided first-time setup: detect the gh user + global git identity and
+    /// register the main account. Interactive by default; agents use --auto.
+    Setup {
+        /// Non-interactive: take everything from `gh` + global git config
+        #[arg(long)]
+        auto: bool,
+        /// Alias for the main account (default: main)
+        #[arg(long, default_value = "main")]
+        main_alias: String,
+    },
     /// Check gh auth, keys, ssh config and current repo
-    Doctor,
+    Doctor {
+        /// Machine-readable output (for scripts and AI agents)
+        #[arg(long)]
+        json: bool,
+        /// Repair what can be repaired: recreate missing SSH Host blocks and
+        /// fix the current repo's remote URL when its identity matches an account
+        #[arg(long)]
+        fix: bool,
+    },
     /// Print shell completions (bash, zsh, fish, powershell, elvish).
     /// Example: gitswitch completions bash >> ~/.bash_completion
     Completions {
@@ -122,7 +140,8 @@ fn main() -> Result<()> {
         Cmd::Exec { alias, git_args } => cmd_exec(&alias, &git_args),
         Cmd::Clone { alias, repo, dest } => cmd_clone(&alias, &repo, dest),
         Cmd::GenKey { alias, force } => cmd_gen_key(&alias, force),
-        Cmd::Doctor => cmd_doctor(),
+        Cmd::Setup { auto, main_alias } => cmd_setup(auto, &main_alias),
+        Cmd::Doctor { json, fix } => cmd_doctor(json, fix),
         Cmd::Completions { shell } => {
             generate(shell, &mut Cli::command(), "gitswitch", &mut std::io::stdout());
             Ok(())
@@ -218,11 +237,7 @@ fn cmd_add(alias: &str, username: Option<&str>, email: Option<&str>, name: Optio
         let email = email.map(str::to_string)
             .or_else(|| git::global_config("user.email").ok())
             .context("pass --email (could not read global git user.email)")?;
-        st.accounts.push(store::Account {
-            alias: alias.clone(), username, name: display, email,
-            auth: "gh".into(), ssh_key: None, ssh_alias: None,
-        });
-        st.save()?;
+        push_main_account(&mut st, &alias, &username, &display, &email)?;
         println!("Added main account '{alias}' (gh/HTTPS).");
         println!("Activate in a repo with: gitswitch use {alias}");
         return Ok(());
@@ -258,6 +273,74 @@ fn cmd_add(alias: &str, username: Option<&str>, email: Option<&str>, name: Optio
     Ok(())
 }
 
+fn push_main_account(st: &mut store::Store, alias: &str, username: &str, name: &str, email: &str) -> Result<()> {
+    if st.accounts.iter().any(|a| a.alias == alias) {
+        bail!("account '{alias}' already exists (use `gitswitch remove {alias}` first)");
+    }
+    st.accounts.push(store::Account {
+        alias: alias.to_string(),
+        username: username.to_string(),
+        name: name.to_string(),
+        email: email.to_string(),
+        auth: "gh".into(), ssh_key: None, ssh_alias: None,
+    });
+    st.save()
+}
+
+fn prompt(label: &str, default: &str) -> Result<String> {
+    use std::io::{BufRead, Write};
+    print!("{label} [{default}]: ");
+    std::io::stdout().flush()?;
+    let mut line = String::new();
+    std::io::stdin().lock().read_line(&mut line)?;
+    let line = line.trim().to_string();
+    Ok(if line.is_empty() { default.to_string() } else { line })
+}
+
+fn gh_login() -> Result<String> {
+    let out = Command::new("gh").args(["api", "user", "--jq", ".login"]).output()
+        .context("`gh` not found — install it and run `gh auth login` first")?;
+    if !out.status.success() {
+        bail!("not logged into gh (run `gh auth login` first)");
+    }
+    let login = String::from_utf8_lossy(&out.stdout).trim().trim_matches('"').to_string();
+    if login.is_empty() { bail!("could not read gh username"); }
+    Ok(login)
+}
+
+fn cmd_setup(auto: bool, main_alias: &str) -> Result<()> {
+    let main_alias = store::norm_alias(main_alias)?;
+    let login = gh_login()?;
+    let mut st = store::load()?;
+    if st.accounts.iter().any(|a| a.alias == main_alias) {
+        println!("Account '{main_alias}' already registered — nothing to do.");
+    } else {
+        let gname = git::global_config("user.name").unwrap_or_default();
+        let gemail = git::global_config("user.email").unwrap_or_default();
+        let (username, name, email) = if auto {
+            if gemail.is_empty() {
+                bail!("global git user.email is empty — set it (`git config --global user.email you@mail`) or run setup interactively");
+            }
+            (login.clone(), if gname.is_empty() { login.clone() } else { gname }, gemail)
+        } else {
+            println!("Detected gh user: {login}");
+            let username = prompt("GitHub username", &login)?;
+            let name = prompt("Display name for commits", if gname.is_empty() { &username } else { &gname })?;
+            let email = prompt("Commit email", &gemail)?;
+            if email.is_empty() { bail!("email is required"); }
+            (username, name, email)
+        };
+        push_main_account(&mut st, &main_alias, &username, &name, &email)?;
+        println!("Registered main account '{main_alias}' ({name} <{email}>) via gh/HTTPS.");
+    }
+    println!("\nNext: add an extra account (repeat per account):");
+    println!("  gitswitch add --alias work --username <gh-user> --email <mail>");
+    println!("  gitswitch gen-key work");
+    println!("  gh ssh-key add ~/.ssh/id_work.pub --title gitswitch-work");
+    println!("Agents: see AGENTS.md / SKILL.md (`status --json`, `exec <alias> -- …`).");
+    Ok(())
+}
+
 fn cmd_remove(alias: &str, yes: bool, drop_ssh: bool) -> Result<()> {
     let mut st = store::load()?;
     let pos = st.accounts.iter().position(|a| a.alias == alias)
@@ -289,7 +372,13 @@ fn cmd_use(alias: &str, remote: &str, global: bool) -> Result<()> {
     git::assert_in_repo().context("`gitswitch use` must run inside a git repo (or pass --global)")?;
     git::set_local_config("user.name", &a.name)?;
     git::set_local_config("user.email", &a.email)?;
-    // Clear any stale sshCommand override — we use Host aliases in the remote URL instead.
+    apply_account_to_repo(a, &a.alias.clone(), remote)
+}
+
+/// Set identity-related repo state for an account: clear stale sshCommand
+/// overrides and rewrite the remote URL (SSH url for ssh accounts, HTTPS for gh).
+/// Caller sets user.name/user.email (or relies on them already matching).
+fn apply_account_to_repo(a: &store::Account, alias: &str, remote: &str) -> Result<()> {
     let _ = git::unset_local_config("core.sshCommand");
     match a.auth.as_str() {
         "gh" => {
@@ -426,30 +515,82 @@ fn cmd_gen_key(alias: &str, force: bool) -> Result<()> {
     Ok(())
 }
 
-fn cmd_doctor() -> Result<()> {
-    println!("== gh ==");
-    match Command::new("gh").args(["auth", "status"]).status() {
-        Ok(s) if s.success() => println!("gh: logged in"),
-        _ => println!("gh: NOT logged in (main account pushes will fail)"),
-    }
-    println!("\n== global git identity ==");
-    println!("{} <{}>", git::global_config("user.name").unwrap_or_default(), git::global_config("user.email").unwrap_or_default());
-    println!("\n== accounts ==");
+fn cmd_doctor(json: bool, fix: bool) -> Result<()> {
+    let gh_ok = Command::new("gh").args(["auth", "status"]).status().map(|s| s.success()).unwrap_or(false);
+    let gname = git::global_config("user.name").unwrap_or_default();
+    let gemail = git::global_config("user.email").unwrap_or_default();
     let st = store::load()?;
-    if st.accounts.is_empty() { println!("(none)"); }
+
+    struct AcctHealth { alias: String, auth: String, key_ok: bool, key: String, host_ok: bool, host: String }
+    let mut health = Vec::new();
     for a in &st.accounts {
-        let key_ok = match &a.ssh_key {
-            None => "n/a (gh)".to_string(),
-            Some(k) => {
-                let p = store::expand_tilde(&PathBuf::from(k));
-                if p.exists() { format!("key OK ({k})") } else { format!("MISSING key ({k})") }
+        let (key_ok, key) = match &a.ssh_key {
+            None => (true, String::new()),
+            Some(k) => (store::expand_tilde(&PathBuf::from(k)).exists(), k.clone()),
+        };
+        let (host_ok, host) = match &a.ssh_alias {
+            None => (true, String::new()),
+            Some(h) => (ssh::host_exists(h).unwrap_or(false), h.clone()),
+        };
+        // --fix: recreate missing SSH Host blocks (key path may not exist yet —
+        // the block still helps, and gen-key refreshes it).
+        if fix && a.auth == "ssh" && !host_ok && !host.is_empty() && !key.is_empty() {
+            match ssh::ensure_host_entry(&host, &key) {
+                Ok(()) => println!("fixed: recreated SSH Host {host} for '{}'", a.alias),
+                Err(e) => println!("could not fix SSH Host {host}: {e:#}"),
             }
-        };
-        let host_ok = match &a.ssh_alias {
-            None => "".to_string(),
-            Some(h) => if ssh::host_exists(h).unwrap_or(false) { format!(", Host {h} OK") } else { format!(", Host {h} MISSING") },
-        };
-        println!("- {} [{}] {} <{}> — {key_ok}{host_ok}", a.alias, a.auth, a.name, a.email);
+        }
+        health.push(AcctHealth { alias: a.alias.clone(), auth: a.auth.clone(), key_ok, key, host_ok: if fix && a.auth == "ssh" && !host.is_empty() { ssh::host_exists(&host).unwrap_or(false) } else { host_ok }, host });
+    }
+
+    // --fix: if the current repo's local email matches an account, repair its
+    // remote URL (same rewrite `use` performs, without touching identity).
+    let in_repo = git::repo_root().is_ok();
+    let lemail = if in_repo { git::local_config("user.email").unwrap_or_default() } else { String::new() };
+    if fix && in_repo && !lemail.is_empty() {
+        if let Some(a) = st.accounts.iter().find(|a| a.email == lemail) {
+            let alias = a.alias.clone();
+            if let Err(e) = apply_account_to_repo(a, &alias, "origin") {
+                println!("could not fix remote URL: {e:#}");
+            }
+        }
+    }
+
+    if json {
+        let v = serde_json::json!({
+            "gh_logged_in": gh_ok,
+            "global": { "name": gname, "email": gemail },
+            "accounts": health.iter().map(|h| serde_json::json!({
+                "alias": h.alias, "auth": h.auth,
+                "key_ok": h.key_ok, "key": h.key,
+                "host_ok": h.host_ok, "host": h.host,
+            })).collect::<Vec<_>>(),
+            "repo": match git::repo_root() {
+                Ok(r) => serde_json::json!({
+                    "root": r.to_string_lossy(),
+                    "local": { "name": git::local_config("user.name").unwrap_or_default(),
+                               "email": git::local_config("user.email").unwrap_or_default() },
+                    "origin": git::remote_url("origin").ok(),
+                }),
+                Err(_) => serde_json::Value::Null,
+            },
+        });
+        println!("{}", serde_json::to_string_pretty(&v)?);
+        return Ok(());
+    }
+
+    println!("== gh ==");
+    println!("{}", if gh_ok { "gh: logged in" } else { "gh: NOT logged in (main account pushes will fail)" });
+    println!("\n== global git identity ==");
+    println!("{gname} <{gemail}>");
+    println!("\n== accounts ==");
+    if health.is_empty() { println!("(none — run `gitswitch setup`)"); }
+    for h in &health {
+        let key_s = if h.auth == "gh" { "n/a (gh)".to_string() }
+            else if h.key_ok { format!("key OK ({})", h.key) } else { format!("MISSING key ({})", h.key) };
+        let host_s = if h.host.is_empty() { String::new() }
+            else if h.host_ok { format!(", Host {} OK", h.host) } else { format!(", Host {} MISSING", h.host) };
+        println!("- {} [{}] — {key_s}{host_s}", h.alias, h.auth);
     }
     println!("\n== current repo ==");
     match git::repo_root() {

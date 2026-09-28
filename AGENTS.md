@@ -25,7 +25,21 @@ gitswitch exec work -- commit -m "fix: ..."
 gitswitch exec work -- push
 gitswitch exec main -- push           # push via gh/HTTPS account
 gitswitch doctor                      # something broken? start here
+gitswitch doctor --json               # same, machine-readable
+gitswitch doctor --fix                # recreate missing SSH blocks, repair this repo's remote URL
 ```
+
+## First-time setup (you may run this for the user)
+
+```bash
+gitswitch setup --auto                # register main from gh login + global git config
+# extra account (needs username + email from the user — ask, don't invent):
+gitswitch add --alias work --username <gh-user> --email <mail>
+gitswitch gen-key work                # prints the `gh ssh-key add ...` command;
+                                      # STOP here — the user must upload the key themselves
+```
+
+Never upload SSH keys, never run `gh auth login`, never invent emails.
 
 ## Model
 
