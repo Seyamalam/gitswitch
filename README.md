@@ -84,27 +84,33 @@ Verify with `gitswitch list`.
 
 ### 2. Add a second account (5 min)
 
+Agent-led (recommended) — the agent runs it and tells you exactly where to
+click on GitHub:
+
 ```bash
-# 1) register it (creates the ~/.ssh/config entry)
-gitswitch add --alias work --username <github-username> --email <work@email.com>
-
-# 2) generate its SSH key
-gitswitch gen-key work
-
-# 3) upload the public key to that GitHub account
-gh ssh-key add ~/.ssh/id_work.pub --title gitswitch-work
-# (log into the *work* account in the browser first if gh asks, or paste the
-#  .pub contents at github.com → Settings → SSH and GPG keys)
-
-# 4) test it (type "yes" if asked about the host key)
-ssh -T git@github-work
-# expected: "Hi <github-username>! You've successfully authenticated..."
+gitswitch onboard --alias work --username <github-username> --email <work@email.com>
 ```
 
-Repeat for a third, fourth, … account. Each gets its own key and
-`github-<alias>` host — they never interfere.
+`onboard` registers the account, generates its key, prints numbered steps
+(github.com → Settings → SSH keys, title `gitswitch-work`, key included),
+waits for you, then verifies with a live `ssh -T` check.
+Manual equivalent: `add` → `gen-key` → `gh ssh-key add ~/.ssh/id_work.pub`.
 
-### 3. Use it in a repo
+Repeat per account. Each gets its own key and `github-<alias>` host.
+
+### 3. (Optional) Tokens — let an account open PRs and issues
+
+SSH covers git push/pull; the `gh` CLI needs a token to act *as* that account:
+
+1. Logged in as that account: github.com → Settings → Developer settings →
+   Personal access tokens → Tokens (classic) → Generate new token (classic)
+2. Note `gitswitch-<alias>`, scopes **repo** + **workflow**, Generate
+3. Store it (input hidden, never shown): `gitswitch set-token <alias>`
+4. Use it: `gitswitch gh <alias> -- pr create --title "…" --body "…"`
+
+Tokens live in `accounts.toml` (mode 0600) and are never printed anywhere.
+
+### 4. Use it in a repo
 
 ```bash
 cd ~/my-project
@@ -132,7 +138,44 @@ gitswitch exec work -- push
 gitswitch exec main -- pull --rebase
 ```
 
-Everything after `--` is passed to `git` verbatim.
+Everything after `--` is passed to `git` verbatim. For `gh` (PRs, issues,
+releases) as an account:
+
+```bash
+gitswitch gh work -- pr create --title "Add feature" --body "…" --head work-feature
+gitswitch gh work -- pr merge 3 --squash --delete-branch
+gitswitch gh work -- issue list
+```
+
+Uses the account's stored token, falling back to your `gh` login.
+
+## Mock-hackathon playbook (simulate multiple contributors)
+
+Each "person" is an account with a distinct email — GitHub's contributors
+graph keys off commit emails, so they show up as distinct contributors.
+An agent can run the whole demo; you only click on GitHub during onboarding.
+
+```bash
+# 1) onboard one account per persona (agent prints your click-steps each time)
+gitswitch onboard --alias alice --username alicegh --email alice@demo.com
+gitswitch onboard --alias bob   --username bobgh   --email bob@demo.com
+
+# 2) optional: tokens so each persona opens their own PRs (see §3 above)
+gitswitch set-token alice
+gitswitch set-token bob
+
+# 3) the demo loop, per persona — repo config never changes:
+git checkout -b alice-feature
+# ... work happens (by you or an agent) ...
+gitswitch exec alice -- commit -am "feat: alice's feature"
+gitswitch exec alice -- push -u origin alice-feature
+gitswitch gh alice -- pr create --title "Alice's feature" --body "…" --head alice-feature
+gitswitch gh alice -- pr merge <n> --squash --delete-branch
+# repeat as bob on bob-feature → two contributors, two merged PRs
+```
+
+Tips: open PRs with `--fill` to skip the editor; agents should confirm the
+account + repo with you before each push/PR (see `AGENTS.md`).
 
 ## For AI agents
 
@@ -157,6 +200,10 @@ format). The short version:
 | `gitswitch use <alias> [--remote origin] [--global]` | switch current repo (or global) identity |
 | `gitswitch exec <alias> -- <git args…>` | run one git command as that account |
 | `gitswitch clone <alias> <owner/repo\|url> [dest]` | clone with the right URL + identity |
+| `gitswitch onboard --alias … --username … --email … [--no-wait]` | agent-led setup: register + key + GitHub steps + verify |
+| `gitswitch verify <alias>` | live access check (`ssh -T`) |
+| `gitswitch set-token <alias> [--token …]` | store a classic PAT for `gh` as that account |
+| `gitswitch gh <alias> -- <gh args…>` | run gh as that account (stored token or login) |
 | `gitswitch remove <alias> [--drop-ssh]` | delete account (optionally its SSH block) |
 | `gitswitch setup [--auto]` | first-time setup: register main from `gh` + global git config (`--auto` = non-interactive, for agents) |
 | `gitswitch doctor [--json] [--fix]` | check everything (`--json` for agents; `--fix` recreates SSH blocks + repairs repo URL) |

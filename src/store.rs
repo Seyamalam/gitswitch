@@ -12,6 +12,11 @@ pub struct Account {
     pub auth: String,
     pub ssh_key: Option<String>,
     pub ssh_alias: Option<String>,
+    /// Optional per-account token (classic PAT with repo+workflow) so
+    /// `gitswitch gh <alias> -- …` can act as this account (PRs, issues…).
+    /// Never printed by list/status. File is stored with 0600 on unix.
+    #[serde(default)]
+    pub token: Option<String>,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -57,6 +62,14 @@ impl Store {
         let p = store_path()?;
         let s = toml::to_string_pretty(self)?;
         std::fs::write(&p, s)?;
+        // The store may hold per-account tokens — keep it private.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perm = std::fs::metadata(&p)?.permissions();
+            perm.set_mode(0o600);
+            std::fs::set_permissions(&p, perm)?;
+        }
         Ok(())
     }
 }

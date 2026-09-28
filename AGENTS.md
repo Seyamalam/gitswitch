@@ -34,12 +34,38 @@ gitswitch doctor --fix                # recreate missing SSH blocks, repair this
 ```bash
 gitswitch setup --auto                # register main from gh login + global git config
 # extra account (needs username + email from the user — ask, don't invent):
-gitswitch add --alias work --username <gh-user> --email <mail>
-gitswitch gen-key work                # prints the `gh ssh-key add ...` command;
-                                      # STOP here — the user must upload the key themselves
+gitswitch onboard --alias work --username <gh-user> --email <mail> [--no-wait]
+# onboard prints numbered GitHub steps (settings/keys) for the HUMAN — relay
+# them verbatim, wait for confirmation, then run `gitswitch verify work`.
 ```
 
 Never upload SSH keys, never run `gh auth login`, never invent emails.
+
+## Tokens (PRs / issues as another account)
+
+- `gitswitch gh <alias> -- <gh args…>` runs gh as that account (stored token
+  or your login). Example: `gitswitch gh alice -- pr create --title "…" --fill`
+- Tokens live in `~/.config/gitswitch/accounts.toml` (0600) and are NEVER
+  printed — not even by `list --json` (it only shows `has_token`).
+- To store one, have the user create it (github.com → that account →
+  Settings → Developer settings → Personal access tokens → Tokens (classic) →
+  Generate, note `gitswitch-<alias>`, scopes `repo` + `workflow`), then run
+  `gitswitch set-token <alias>` and let the USER paste at the hidden prompt.
+- Rules: never print, log, or echo a token; never pass one with --token in a
+  shared transcript — prefer the hidden prompt. Tokens authorize pushes/PRs,
+  so confirm the account + repo with the user before pushing or opening a PR.
+
+## Hackathon simulation (multiple contributors)
+
+Each contributor is an account. The loop per contributor, all without
+touching repo config:
+```bash
+gitswitch exec alice -- commit -m "feat: …"
+gitswitch exec alice -- push -u origin alice-feature
+gitswitch gh alice -- pr create --title "…" --body "…" --head alice-feature
+```
+GitHub's contributors graph keys off commit emails, so distinct account
+emails show distinct contributors. Merge with `gitswitch gh <alias> -- pr merge <n> --squash --delete-branch` (confirm first).
 
 ## Model
 

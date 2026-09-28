@@ -121,6 +121,46 @@ enum Cmd {
         #[arg(long)]
         fix: bool,
     },
+    /// Agent-led setup for one SSH account: register it, generate its key,
+    /// print the exact GitHub steps for the human, then verify access.
+    Onboard {
+        /// Short alias, e.g. alice, bob
+        #[arg(long)]
+        alias: String,
+        /// That account's GitHub username
+        #[arg(long)]
+        username: String,
+        /// That account's commit email
+        #[arg(long)]
+        email: String,
+        /// Display name for commits (defaults to username)
+        #[arg(long)]
+        name: Option<String>,
+        /// Don't wait for Enter after printing the GitHub steps
+        /// (the agent will run `verify` later)
+        #[arg(long)]
+        no_wait: bool,
+    },
+    /// Live-check that an account can reach GitHub (ssh -T for SSH accounts)
+    Verify {
+        alias: String,
+    },
+    /// Store a classic PAT (scopes: repo, workflow) for an account so
+    /// `gitswitch gh <alias> -- …` can act as them (PRs, issues…). Reads the
+    /// token hidden from a prompt, or pass --token (careful: shell history).
+    SetToken {
+        alias: String,
+        #[arg(long)]
+        token: Option<String>,
+    },
+    /// Run a gh command as an account (uses its stored token, else your login).
+    /// Example: gitswitch gh alice -- pr create --title "…" --body "…"
+    Gh {
+        alias: String,
+        /// Args passed to gh (everything after --)
+        #[arg(last = true, required = true)]
+        gh_args: Vec<String>,
+    },
     /// Print shell completions (bash, zsh, fish, powershell, elvish).
     /// Example: gitswitch completions bash >> ~/.bash_completion
     Completions {
@@ -141,6 +181,11 @@ fn main() -> Result<()> {
         Cmd::Clone { alias, repo, dest } => cmd_clone(&alias, &repo, dest),
         Cmd::GenKey { alias, force } => cmd_gen_key(&alias, force),
         Cmd::Setup { auto, main_alias } => cmd_setup(auto, &main_alias),
+        Cmd::Onboard { alias, username, email, name, no_wait } =>
+            cmd_onboard(&alias, &username, &email, name.as_deref(), no_wait),
+        Cmd::Verify { alias } => cmd_verify(&alias),
+        Cmd::SetToken { alias, token } => cmd_set_token(&alias, token.as_deref()),
+        Cmd::Gh { alias, gh_args } => cmd_gh(&alias, &gh_args),
         Cmd::Doctor { json, fix } => cmd_doctor(json, fix),
         Cmd::Completions { shell } => {
             generate(shell, &mut Cli::command(), "gitswitch", &mut std::io::stdout());
@@ -152,7 +197,14 @@ fn main() -> Result<()> {
 fn cmd_list(json: bool) -> Result<()> {
     let st = store::load()?;
     if json {
-        println!("{}", serde_json::to_string_pretty(&st.accounts)?);
+        // Deliberately hand-built: Account.token must never leave the store file.
+        let v: Vec<_> = st.accounts.iter().map(|a| serde_json::json!({
+            "alias": a.alias, "username": a.username, "name": a.name,
+            "email": a.email, "auth": a.auth,
+            "ssh_key": a.ssh_key, "ssh_alias": a.ssh_alias,
+            "has_token": a.token.as_ref().map(|t| !t.is_empty()).unwrap_or(false),
+        })).collect();
+        println!("{}", serde_json::to_string_pretty(&v)?);
         return Ok(());
     }
     if st.accounts.is_empty() {
@@ -243,34 +295,58 @@ fn cmd_add(alias: &str, username: Option<&str>, email: Option<&str>, name: Optio
         return Ok(());
     }
     // SSH account
-    let ssh_alias = ssh_alias.map(str::to_string).unwrap_or_else(|| format!("github-{alias}"));
-    let key_path = match ssh_key {
-        Some(p) => store::expand_tilde(&p),
-        None => dirs::home_dir().context("no home dir")?.join(".ssh").join(format!("id_{alias}")),
-    };
-    let username = username.unwrap_or(&alias).to_string();
-    let display = name.unwrap_or(&username).to_string();
-    let email = email.context("pass --email for the SSH account (e.g. --email work@company.com)")?.to_string();
-    let acct = store::Account {
-        alias: alias.clone(), username, name: display, email,
-        auth: "ssh".into(), ssh_key: Some(key_path.to_string_lossy().into_owned()),
-        ssh_alias: Some(ssh_alias.clone()),
-    };
-    if !no_ssh_setup {
-        let key_str = key_path.to_string_lossy().into_owned();
-        ssh::ensure_host_entry(&ssh_alias, &key_str)
-            .context("failed writing ~/.ssh/config")?;
-    }
-    st.accounts.push(acct);
-    st.save()?;
-    println!("Added SSH account '{alias}' (Host {ssh_alias}).");
+    let email = email.context("pass --email for the SSH account (e.g. --email work@company.com)")?;
+    let key_path = push_ssh_account(&mut st, &alias, username, name, email, ssh_key, ssh_alias, no_ssh_setup)?;
+    println!("Added SSH account '{alias}'.");
     if !key_path.exists() {
         println!("No key at {} yet — run: gitswitch gen-key {alias}", key_path.display());
         println!("Then add the .pub to GitHub: gh ssh-key add {} --title gitswitch-{alias}", key_path.with_extension("pub").display());
     } else if !no_ssh_setup {
-        println!("SSH config Host {ssh_alias} ready. Activate with: gitswitch use {alias}");
+        println!("SSH config ready. Activate with: gitswitch use {alias}");
     }
     Ok(())
+}
+
+fn push_ssh_account(st: &mut store::Store, alias: &str, username: Option<&str>, name: Option<&str>,
+                    email: &str, ssh_key: Option<PathBuf>, ssh_alias: Option<&str>, no_ssh_setup: bool) -> Result<PathBuf> {
+    if st.accounts.iter().any(|a| a.alias == alias) {
+        bail!("account '{alias}' already exists (use `gitswitch remove {alias}` first)");
+    }
+    let host = ssh_alias.map(str::to_string).unwrap_or_else(|| format!("github-{alias}"));
+    let key_path = match ssh_key {
+        Some(p) => store::expand_tilde(&p),
+        None => dirs::home_dir().context("no home dir")?.join(".ssh").join(format!("id_{alias}")),
+    };
+    let username = username.unwrap_or(alias).to_string();
+    let display = name.unwrap_or(&username).to_string();
+    st.accounts.push(store::Account {
+        alias: alias.to_string(), username, name: display, email: email.to_string(),
+        auth: "ssh".into(), ssh_key: Some(key_path.to_string_lossy().into_owned()),
+        ssh_alias: Some(host.clone()), token: None,
+    });
+    if !no_ssh_setup {
+        let key_str = key_path.to_string_lossy().into_owned();
+        ssh::ensure_host_entry(&host, &key_str).context("failed writing ~/.ssh/config")?;
+        println!("SSH Host {host} ready.");
+    }
+    st.save()?;
+    Ok(key_path)
+}
+
+/// Create the ed25519 key if missing (returns true when created) and always
+/// refresh the managed SSH Host block.
+fn ensure_ssh_key(key_path: &std::path::Path, host: &str, alias: &str) -> Result<bool> {
+    if key_path.exists() {
+        ssh::ensure_host_entry(host, &key_path.to_string_lossy())?;
+        return Ok(false);
+    }
+    if let Some(p) = key_path.parent() { std::fs::create_dir_all(p)?; }
+    let status = Command::new("ssh-keygen")
+        .args(["-t", "ed25519", "-f", &key_path.to_string_lossy(), "-N", "", "-C", &format!("gitswitch-{alias}")])
+        .status().context("ssh-keygen failed — is openssh installed?")?;
+    if !status.success() { bail!("ssh-keygen exited with {status}"); }
+    ssh::ensure_host_entry(host, &key_path.to_string_lossy())?;
+    Ok(true)
 }
 
 fn push_main_account(st: &mut store::Store, alias: &str, username: &str, name: &str, email: &str) -> Result<()> {
@@ -282,7 +358,7 @@ fn push_main_account(st: &mut store::Store, alias: &str, username: &str, name: &
         username: username.to_string(),
         name: name.to_string(),
         email: email.to_string(),
-        auth: "gh".into(), ssh_key: None, ssh_alias: None,
+        auth: "gh".into(), ssh_key: None, ssh_alias: None, token: None,
     });
     st.save()
 }
@@ -498,12 +574,11 @@ fn cmd_gen_key(alias: &str, force: bool) -> Result<()> {
     if key_path.exists() && !force {
         bail!("key {} exists (pass --force to overwrite)", key_path.display());
     }
-    if let Some(p) = key_path.parent() { std::fs::create_dir_all(p)?; }
-    let status = Command::new("ssh-keygen")
-        .args(["-t", "ed25519", "-f", &key_path.to_string_lossy(), "-N", "", "-C", &format!("gitswitch-{alias}")])
-        .status().context("ssh-keygen failed — is openssh installed?")?;
-    if !status.success() { bail!("ssh-keygen exited with {status}"); }
-    ssh::ensure_host_entry(&host, &key_path.to_string_lossy())?;
+    if force && key_path.exists() {
+        std::fs::remove_file(&key_path).ok();
+        std::fs::remove_file(key_path.with_extension("pub")).ok();
+    }
+    ensure_ssh_key(&key_path, &host, alias)?;
     println!("Key: {}", key_path.display());
     println!("SSH Host {host} ready.");
     println!("Add to GitHub:  gh ssh-key add {}.pub --title gitswitch-{alias}", key_path.display());
@@ -512,6 +587,130 @@ fn cmd_gen_key(alias: &str, force: bool) -> Result<()> {
         st.accounts[i].ssh_key = Some(key_path.to_string_lossy().into_owned());
         st.save()?;
     }
+    Ok(())
+}
+
+fn cmd_onboard(alias: &str, username: &str, email: &str, name: Option<&str>, no_wait: bool) -> Result<()> {
+    let alias = store::norm_alias(alias)?;
+    let mut st = store::load()?;
+    let display = name.unwrap_or(username).to_string();
+    let key_path: PathBuf;
+    let host: String;
+    if let Some(a) = st.accounts.iter().find(|a| a.alias == alias) {
+        if a.auth == "gh" { bail!("'{alias}' is the main (gh) account — onboard is for extra SSH accounts"); }
+        key_path = store::expand_tilde(&PathBuf::from(a.ssh_key.clone().unwrap_or_default()));
+        host = a.ssh_alias.clone().unwrap_or_else(|| format!("github-{alias}"));
+        println!("Account '{alias}' already registered, continuing with key setup.");
+    } else {
+        key_path = push_ssh_account(&mut st, &alias, Some(username), Some(&display), email, None, None, false)?;
+        host = format!("github-{alias}");
+    }
+    let created = ensure_ssh_key(&key_path, &host, &alias)?;
+    if created {
+        println!("Generated key: {}", key_path.display());
+    } else {
+        println!("Key already exists: {}", key_path.display());
+    }
+    // normalize stored key path (matters when the account pre-existed)
+    if let Some(i) = st.accounts.iter().position(|a| a.alias == alias) {
+        st.accounts[i].ssh_key = Some(key_path.to_string_lossy().into_owned());
+        st.accounts[i].ssh_alias = Some(host.clone());
+        st.save()?;
+    }
+
+    let pubkey = std::fs::read_to_string(key_path.with_extension("pub"))?.trim().to_string();
+    println!("\n=== HUMAN STEP: add this key to GitHub as {username} ===");
+    println!("1. Log into GitHub AS {username} and open: https://github.com/settings/keys");
+    println!("2. Click \"New SSH key\"");
+    println!("3. Title: gitswitch-{alias}   |   Key type: Authentication Key");
+    println!("4. Paste this entire line into the Key box:");
+    println!("\n{pubkey}\n");
+    println!("5. Click \"Add SSH key\"");
+    if !no_wait {
+        println!("Press Enter here when done (the agent is waiting) …");
+        let mut line = String::new();
+        std::io::stdin().read_line(&mut line)?;
+    }
+    match cmd_verify_inner(&alias) {
+        Ok(who) => {
+            println!("Verified: {who}");
+            println!("\nOptional (lets this account open PRs/issues): create a token at");
+            println!("https://github.com/settings/tokens (Generate new token (classic),");
+            println!("note gitswitch-{alias}, scopes: repo + workflow), then run:");
+            println!("  gitswitch set-token {alias}");
+            Ok(())
+        }
+        Err(e) => {
+            println!("\nNot verified yet: {e:#}");
+            println!("If you just added the key, wait ~30s and run: gitswitch verify {alias}");
+            Err(e)
+        }
+    }
+}
+
+/// Shared by `verify` and `onboard`. Returns the authenticated GitHub username.
+fn cmd_verify_inner(alias: &str) -> Result<String> {
+    let st = store::load()?;
+    let a = st.accounts.iter().find(|a| a.alias == alias)
+        .with_context(|| format!("no account '{alias}' (see `gitswitch list`)"))?;
+    if a.auth == "gh" {
+        let out = Command::new("gh").args(["api", "user", "--jq", ".login"]).output()
+            .context("`gh` not found")?;
+        if !out.status.success() { bail!("gh is not logged in (run `gh auth login`)"); }
+        let login = String::from_utf8_lossy(&out.stdout).trim().trim_matches('"').to_string();
+        return Ok(format!("gh logged in as {login}"));
+    }
+    let host = a.ssh_alias.clone().unwrap_or_else(|| format!("github-{alias}"));
+    let out = Command::new("ssh").args(["-T", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=accept-new", &host])
+        .output().context("ssh failed — is openssh installed?")?;
+    // GitHub's success message arrives on stderr with exit code 1.
+    let combined = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    if combined.contains("successfully authenticated") {
+        let who = combined.lines().find(|l| l.contains("successfully authenticated")).unwrap_or("").trim().to_string();
+        return Ok(who);
+    }
+    bail!("SSH as {host} failed. Key uploaded? Right GitHub user? `ssh -Tv {host}` for details. ({})", combined.trim().lines().last().unwrap_or(""))
+}
+
+fn cmd_verify(alias: &str) -> Result<()> {
+    let who = cmd_verify_inner(alias)?;
+    println!("OK {alias}: {who}");
+    Ok(())
+}
+
+fn cmd_set_token(alias: &str, token: Option<&str>) -> Result<()> {
+    let mut st = store::load()?;
+    let i = st.accounts.iter().position(|a| a.alias == alias)
+        .with_context(|| format!("no account '{alias}' (see `gitswitch list`)"))?;
+    let tok = match token {
+        Some(t) => t.trim().to_string(),
+        None => rpassword::prompt_password("Paste token (input hidden, never shown or logged): ")?.trim().to_string(),
+    };
+    if tok.is_empty() { bail!("empty token — nothing stored"); }
+    if !(tok.starts_with("ghp_") || tok.starts_with("github_pat_")) {
+        println!("warning: doesn't look like a classic/PAT token — storing anyway");
+    }
+    st.accounts[i].token = Some(tok);
+    st.save()?;
+    println!("Token stored for '{alias}' (used only by `gitswitch gh {alias} -- …`).");
+    Ok(())
+}
+
+fn cmd_gh(alias: &str, gh_args: &[String]) -> Result<()> {
+    let st = store::load()?;
+    let a = st.accounts.iter().find(|a| a.alias == alias)
+        .with_context(|| format!("no account '{alias}' (see `gitswitch list`)"))?;
+    let mut cmd = Command::new("gh");
+    cmd.args(gh_args);
+    match &a.token {
+        Some(t) if !t.is_empty() => {
+            cmd.env("GH_TOKEN", t);
+            println!("$ gh {}  (as {} via stored token)", gh_args.join(" "), a.alias);
+        }
+        _ => println!("$ gh {}  (as {} via gh login — no stored token)", gh_args.join(" "), a.alias),
+    }
+    let status = cmd.status().context("failed to run gh")?;
+    if !status.success() { bail!("gh exited with {status}"); }
     Ok(())
 }
 

@@ -51,7 +51,26 @@ If auth fails, surface `doctor` output to the user instead of retrying.
 gitswitch setup --auto      # register main from gh login + global git config
 ```
 
-Extra accounts need a username + email from the user — ask, don't invent.
-After `gitswitch gen-key <alias>`, STOP: the user must upload the `.pub`
-key to that GitHub account themselves. Never upload keys or run `gh auth login`.
+Extra accounts need a username + email from the user — ask, don't invent:
+```bash
+gitswitch onboard --alias <a> --username <gh-user> --email <mail>
+```
+`onboard` prints numbered GitHub steps (settings/keys) for the HUMAN — relay
+them verbatim, wait for confirmation, then `gitswitch verify <a>`.
+After key upload STOP if a token is also wanted: user creates a classic PAT
+(scopes repo + workflow) and pastes it at `gitswitch set-token <a>`.
+Never upload keys, never handle tokens beyond the hidden prompt, never run
+`gh auth login`.
+
+## Act as an account (commits, pushes, PRs)
+
+```bash
+gitswitch exec <a> -- commit -m "…"
+gitswitch exec <a> -- push -u origin <branch>
+gitswitch gh <a> -- pr create --title "…" --body "…" --head <branch>
+gitswitch gh <a> -- pr merge <n> --squash --delete-branch   # confirm with user first
+```
+
+Tokens are never printed — not even by `--json` (only `has_token`).
+Confirm account + repo with the user before pushing or opening a PR.
 See `AGENTS.md` for the full agent contract.
