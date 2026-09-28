@@ -33,21 +33,26 @@ Check yours: `git --version && gh auth status && ssh -V`.
 
 ## Install
 
-**Option A — from source (all OSes):**
+Everything builds locally — no CI, no downloads of prebuilt binaries.
+Pick the one-liner for your OS (installs Rust via rustup if needed):
+
+```bash
+# Linux / macOS
+curl -fsSL https://raw.githubusercontent.com/Seyamalam/gitswitch/main/install.sh | bash
+```
+
+```powershell
+# Windows (PowerShell)
+irm https://raw.githubusercontent.com/Seyamalam/gitswitch/main/install.ps1 | iex
+```
+
+Or manually (all OSes):
 
 ```bash
 git clone https://github.com/Seyamalam/gitswitch.git
 cd gitswitch
 cargo install --path .
 ```
-
-**Option B — prebuilt binary (macOS / Windows / Linux):**
-
-Download from the [Releases](../../releases) page and put it on your `PATH`:
-
-- macOS (Apple Silicon): `gitswitch-macos-arm64.tar.gz`
-- Windows (x64): `gitswitch-windows-x86_64.zip`
-- Linux (x64): `gitswitch-linux-x86_64.tar.gz`
 
 **Shell completions (optional):**
 
@@ -168,8 +173,6 @@ format). The short version:
   `ssh-add --apple-use-keychain ~/.ssh/id_<alias>`.
 - **Windows + `ssh -T`:** run it in PowerShell or Git Bash; accept the host key
   on first use.
-- **Releases** are built on all three OSes by CI (`.github/workflows/ci.yml`
-  builds + tests; `release.yml` attaches binaries on every `v*` tag).
 
 ## Troubleshooting
 
